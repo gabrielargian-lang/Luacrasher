@@ -197,9 +197,14 @@ end
 local isDestroyActive = false
 local destroyThread = nil
 
--- ===== RESET CHARACTER (Teleport + Full Health) =====
+-- ===== LAG BACK (constant teleport to old position) =====
+local isLagBackActive = false
+local lagBackThread = nil
+local lastPos = nil
+
+-- ===== RESET CHARACTER =====
 local function resetCharacter()
-    -- Stop all lag effects
+    -- Stop all lags
     setMode(nil)
     setFpsLimit(false)
     isDestroyActive = false
@@ -207,21 +212,23 @@ local function resetCharacter()
         pcall(task.cancel, destroyThread)
         destroyThread = nil
     end
-    
+    isLagBackActive = false
+    if lagBackThread then
+        pcall(task.cancel, lagBackThread)
+        lagBackThread = nil
+    end
+
     local char = LP.Character
     if char then
         local root = char:FindFirstChild("HumanoidRootPart")
         local hum = char:FindFirstChild("Humanoid")
-        
+
         if root then
-            -- Find spawn location
             local spawnLocation = nil
             local spawns = Workspace:FindFirstChild("Spawns")
             if spawns and #spawns:GetChildren() > 0 then
                 spawnLocation = spawns:GetChildren()[1]
             end
-            
-            -- If no spawns, find any spawn location in Workspace
             if not spawnLocation then
                 for _, obj in ipairs(Workspace:GetDescendants()) do
                     if obj:IsA("SpawnLocation") then
@@ -230,25 +237,18 @@ local function resetCharacter()
                     end
                 end
             end
-            
-            -- Teleport
             if spawnLocation then
                 root.CFrame = spawnLocation.CFrame * CFrame.new(0, 3, 0)
             else
-                -- Fallback: teleport to 0, 10, 0
                 root.Position = Vector3.new(0, 10, 0)
             end
-            
-            -- Clear velocity
             root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
-        
+
         if hum then
-            -- Full health
             hum.Health = hum.MaxHealth
             hum.PlatformStand = false
-            -- Reset all body parts (if ragdolled)
             for _, part in ipairs(char:GetDescendants()) do
                 if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
                     part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
@@ -257,19 +257,22 @@ local function resetCharacter()
             end
         end
     end
-    
+
     -- Reset state flags
     prevLagN = false
     prevLagC = false
+    prevLagBack = false
     prevFps = false
     isDestroyActive = false
     kicked = false
+    lastPos = nil
 end
 
 -- ===== POLL COMMANDS =====
 local kicked = false
 local prevLagN = false
 local prevLagC = false
+local prevLagBack = false
 local prevFps = false
 local lastReset = 0
 
@@ -282,40 +285,92 @@ local function poll()
         })
     end)
     if not res or not res.Body then return end
-    
+
     local ok2, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
     if not ok2 or type(data) ~= "table" then return end
-    
+
     -- FPS
     local wantFps = (data.fps_limit == true)
     if wantFps ~= prevFps then
         prevFps = wantFps
         setFpsLimit(wantFps)
     end
-    
-    -- RESET (priority - reset character)
+
+    -- RESET (priority)
     if data.reset == true and tick() - lastReset > 2 then
         lastReset = tick()
         resetCharacter()
-        -- Don't return, continue to process other commands after reset
+        -- Continue to process other commands after reset
     end
-    
-    -- Lag modes
+
+    -- LAG N
     local wantN = (data.lag_n == true)
-    local wantC = (data.lag_c == true)
-    if wantC ~= prevLagC or wantN ~= prevLagN then
-        prevLagC = wantC
+    if wantN ~= prevLagN then
         prevLagN = wantN
-        if wantC then
-            setMode("carry")
-        elseif wantN then
+        if wantN then
             setMode("normal")
         else
-            setMode(nil)
+            if not prevLagC and not prevLagBack then setMode(nil) end
         end
     end
-    
-    -- Destroy
+
+    -- LAG C
+    local wantC = (data.lag_c == true)
+    if wantC ~= prevLagC then
+        prevLagC = wantC
+        if wantC then
+            setMode("carry")
+        else
+            if not prevLagN and not prevLagBack then setMode(nil) end
+        end
+    end
+
+    -- LAG BACK (constant pullback)
+    local wantBack = (data.lag_back == true)
+    if wantBack ~= prevLagBack then
+        prevLagBack = wantBack
+        if wantBack then
+            -- Stop other lags (optional)
+            setMode(nil)
+            -- Start lag back thread
+            if lagBackThread then pcall(task.cancel, lagBackThread) end
+            isLagBackActive = true
+            lagBackThread = task.spawn(function()
+                local char = LP.Character
+                if char then
+                    local root = char:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        lastPos = root.Position
+                    end
+                end
+                while isLagBackActive do
+                    task.wait(0.03)
+                    local char = LP.Character
+                    local root = char and char:FindFirstChild("HumanoidRootPart")
+                    if root and lastPos then
+                        -- If player moved far, pull back
+                        local dist = (root.Position - lastPos).Magnitude
+                        if dist > 1 then
+                            root.Position = lastPos
+                            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                        else
+                            -- update lastPos if not moving
+                            lastPos = root.Position
+                        end
+                    end
+                end
+            end)
+        else
+            isLagBackActive = false
+            if lagBackThread then
+                pcall(task.cancel, lagBackThread)
+                lagBackThread = nil
+            end
+            lastPos = nil
+        end
+    end
+
+    -- DESTROY
     local wantDestroy = (data.destroy == true)
     if wantDestroy ~= isDestroyActive then
         isDestroyActive = wantDestroy
@@ -340,20 +395,20 @@ local function poll()
             if destroyThread then pcall(task.cancel, destroyThread) destroyThread = nil end
         end
     end
-    
-    -- Crash
+
+    -- CRASH
     if data.crash == true then
         while true do end
     end
-    
-    -- Kick
+
+    -- KICK
     if data.kick == true and not kicked then
         kicked = true
         LP:Kick("You have been removed for cheating, please remove any cheats to play | CODE: BAC-1633")
     end
 end
 
--- ===== START =====
+-- ===== START LOOPS =====
 heartbeat()
 poll()
 
