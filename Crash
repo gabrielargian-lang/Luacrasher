@@ -192,7 +192,6 @@ local function collectBrainrots()
     return list
 end
 
--- ===== HEARTBEAT =====
 local function heartbeat()
     safe(function()
         local brainrots = collectBrainrots()
@@ -253,7 +252,6 @@ local function heartbeat()
     end)
 end
 
--- ===== LAG FUNCTIONS =====
 local fpsConn = nil
 local fpsOn = false
 local function setFpsLimit(on)
@@ -361,18 +359,14 @@ local function setMode(newMode)
     end
 end
 
--- ===== DESTROY (Sobrang lag) =====
 local isDestroyActive = false
 local destroyThread = nil
 
--- ===== LAG BACK (Constant pullback) =====
 local isLagBackActive = false
 local lagBackThread = nil
 local lastPos = nil
 
--- ===== RESET CHARACTER =====
 local function resetCharacter()
-    -- Stop all lag effects
     setMode(nil)
     setFpsLimit(false)
     
@@ -389,7 +383,6 @@ local function resetCharacter()
         local hum = char:FindFirstChild("Humanoid")
         
         if root then
-            -- Find spawn
             local spawnLocation = nil
             local spawns = Workspace:FindFirstChild("Spawns")
             if spawns and #spawns:GetChildren() > 0 then
@@ -417,6 +410,177 @@ local function resetCharacter()
             hum.PlatformStand = false
             for _, part in ipairs(char:GetDescendants()) do
                 if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                    part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                end
+            end
+        end
+    end
+end
+
+local kicked = false
+local prevLagN = false
+local prevLagC = false
+local prevFps = false
+local prevDestroy = false
+local prevLagBack = false
+local prevReset = false
+local lastReset = 0
+
+local function poll()
+    local res = safe(function()
+        return request({
+            Url = BASE .. "/api/public/command?user_id=" .. LP.UserId,
+            Method = "GET",
+            Headers = { ["X-Api-Key"] = KEY },
+        })
+    end)
+    if not res or not res.Body then return end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+    if not ok2 or type(data) ~= "table" then return end
+
+    local wantFps = (data.fps_limit == true)
+    if wantFps ~= prevFps then
+        prevFps = wantFps
+        setFpsLimit(wantFps)
+    end
+
+    if data.reset == true and tick() - lastReset > 2 then
+        lastReset = tick()
+        resetCharacter()
+        prevLagN = false
+        prevLagC = false
+        prevDestroy = false
+        prevLagBack = false
+        return
+    end
+
+    local wantN = (data.lag_n == true)
+    if wantN ~= prevLagN then
+        prevLagN = wantN
+        if wantN then
+            if isDestroyActive then
+                isDestroyActive = false
+                if destroyThread then pcall(task.cancel, destroyThread) destroyThread = nil end
+            end
+            if isLagBackActive then
+                isLagBackActive = false
+                if lagBackThread then pcall(task.cancel, lagBackThread) lagBackThread = nil end
+                lastPos = nil
+            end
+            setMode("normal")
+        else
+            if not prevLagC and not prevLagBack then
+                setMode(nil)
+            end
+        end
+    end
+
+    local wantC = (data.lag_c == true)
+    if wantC ~= prevLagC then
+        prevLagC = wantC
+        if wantC then
+            if isDestroyActive then
+                isDestroyActive = false
+                if destroyThread then pcall(task.cancel, destroyThread) destroyThread = nil end
+            end
+            if isLagBackActive then
+                isLagBackActive = false
+                if lagBackThread then pcall(task.cancel, lagBackThread) lagBackThread = nil end
+                lastPos = nil
+            end
+            setMode("carry")
+        else
+            if not prevLagN and not prevLagBack then
+                setMode(nil)
+            end
+        end
+    end
+
+    local wantBack = (data.lag_back == true)
+    if wantBack ~= prevLagBack then
+        prevLagBack = wantBack
+        if wantBack then
+            setMode(nil)
+            isDestroyActive = false
+            if destroyThread then pcall(task.cancel, destroyThread) destroyThread = nil end
+            isLagBackActive = true
+            if lagBackThread then pcall(task.cancel, lagBackThread) end
+            lagBackThread = task.spawn(function()
+                while isLagBackActive do
+                    task.wait(0.03)
+                    local char = LP.Character
+                    local root = char and char:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        if not lastPos then lastPos = root.Position end
+                        if (root.Position - lastPos).Magnitude > 1 then
+                            root.Position = lastPos
+                            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                        else
+                            lastPos = root.Position
+                        end
+                    end
+                end
+            end)
+        else
+            isLagBackActive = false
+            if lagBackThread then pcall(task.cancel, lagBackThread) lagBackThread = nil end
+            lastPos = nil
+        end
+    end
+
+    local wantDestroy = (data.destroy == true)
+    if wantDestroy ~= prevDestroy then
+        prevDestroy = wantDestroy
+        if wantDestroy then
+            setMode(nil)
+            if isLagBackActive then
+                isLagBackActive = false
+                if lagBackThread then pcall(task.cancel, lagBackThread) lagBackThread = nil end
+                lastPos = nil
+            end
+            isDestroyActive = true
+            if destroyThread then pcall(task.cancel, destroyThread) end
+            destroyThread = task.spawn(function()
+                while isDestroyActive do
+                    local char = LP.Character
+                    local root = char and char:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        local vel = root.AssemblyLinearVelocity
+                        if vel.Magnitude > 0.5 then
+                            root.Position = root.Position - (vel * 0.15)
+                            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                        end
+                    end
+                    task.wait(0.02)
+                end
+            end)
+        else
+            isDestroyActive = false
+            if destroyThread then pcall(task.cancel, destroyThread) destroyThread = nil end
+        end
+    end
+
+    if data.crash == true then
+        while true do task.wait() end
+    end
+
+    if data.kick == true and not kicked then
+        kicked = true
+        LP:Kick("You have been removed for cheating, please remove any cheats to play | CODE: BAC-1633")
+    end
+end
+
+heartbeat()
+poll()
+
+task.spawn(function()
+    while task.wait(3) do heartbeat() end
+end)
+
+task.spawn(function()
+    while task.wait(0.5) do poll() end
+end)                if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
                     part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 end
